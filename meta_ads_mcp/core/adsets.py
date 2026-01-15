@@ -231,27 +231,37 @@ async def create_adset(
     if lifetime_budget is not None:
         params["lifetime_budget"] = str(lifetime_budget)
     
-    # IMPORTANT: Handle bid strategy carefully to avoid API errors
-    # - LOWEST_COST_WITHOUT_CAP doesn't need bid_amount
-    # - LOWEST_COST_WITH_BID_CAP requires bid_amount
-    # - If neither is specified, don't send bid_strategy at all (uses default LOWEST_COST_WITHOUT_CAP)
+    # IMPORTANT: Handle bid strategy VERY carefully to avoid API errors
+    # Meta API default is LOWEST_COST_WITHOUT_CAP which works great without bid_amount
+    # Strategies requiring bid_amount: LOWEST_COST_WITH_BID_CAP, COST_CAP
+    # 
+    # DEFENSIVE APPROACH: Only include bid_strategy if BOTH:
+    # 1. A bid_strategy is explicitly provided AND
+    # 2. If it requires bid_amount, that is also provided
+    # Otherwise, just don't send bid_strategy and let Meta use defaults
+    
     if bid_strategy:
-        # Only add bid_strategy if explicitly requested
-        params["bid_strategy"] = bid_strategy
-        # If using BID_CAP strategy, bid_amount is required
-        if "BID_CAP" in bid_strategy.upper() or "COST_CAP" in bid_strategy.upper():
-            if bid_amount is None:
-                return json.dumps({
-                    "error": f"bid_amount is required when using {bid_strategy}",
-                    "details": "Please provide a bid_amount in cents (e.g., 100 = $1.00)"
-                }, indent=2)
-            params["bid_amount"] = str(bid_amount)
-        elif bid_amount is not None:
-            # Add bid_amount if provided even for other strategies
-            params["bid_amount"] = str(bid_amount)
+        bid_strategy_upper = bid_strategy.upper()
+        requires_bid_amount = "BID_CAP" in bid_strategy_upper or "COST_CAP" in bid_strategy_upper
+        
+        if requires_bid_amount:
+            if bid_amount is not None:
+                # Both strategy and required bid_amount provided - include both
+                params["bid_strategy"] = bid_strategy
+                params["bid_amount"] = str(bid_amount)
+            else:
+                # Strategy requires bid_amount but none provided - DON'T include bid_strategy
+                # Let Meta use default LOWEST_COST_WITHOUT_CAP instead of failing
+                pass  # Intentionally not adding bid_strategy
+        else:
+            # Strategy doesn't require bid_amount (e.g., LOWEST_COST_WITHOUT_CAP)
+            params["bid_strategy"] = bid_strategy
+            if bid_amount is not None:
+                params["bid_amount"] = str(bid_amount)
     elif bid_amount is not None:
-        # If bid_amount provided without strategy, add it
-        params["bid_amount"] = str(bid_amount)
+        # bid_amount provided without strategy - don't include it either
+        # This prevents confusing the API
+        pass  # Intentionally not adding bid_amount without a strategy
     
     if start_time:
         params["start_time"] = start_time
