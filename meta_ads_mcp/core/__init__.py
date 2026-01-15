@@ -15,6 +15,7 @@ from .targeting import search_interests, get_interest_suggestions, estimate_audi
 from . import reports  # Import module to register conditional tools
 from . import duplication  # Import module to register conditional duplication tools
 from .openai_deep_research import search, fetch  # OpenAI MCP Deep Research tools
+from . import video  # Import video module to register video ad tools
 
 __all__ = [
     'mcp_server',

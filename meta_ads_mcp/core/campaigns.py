@@ -128,7 +128,8 @@ async def create_campaign(
     spend_cap: Optional[int] = None,
     campaign_budget_optimization: Optional[bool] = None,
     ab_test_control_setups: Optional[List[Dict[str, Any]]] = None,
-    use_adset_level_budgets: bool = False
+    use_adset_level_budgets: bool = False,
+    is_adset_budget_sharing_enabled: bool = False
 ) -> str:
     """
     Create a new campaign in a Meta Ads account.
@@ -155,6 +156,7 @@ async def create_campaign(
         campaign_budget_optimization: Whether to enable campaign budget optimization (only used if use_adset_level_budgets=False)
         ab_test_control_setups: Settings for A/B testing (e.g., [{"name":"Creative A", "ad_format":"SINGLE_IMAGE"}])
         use_adset_level_budgets: If True, budgets will be set at the ad set level instead of campaign level (default: False)
+        is_adset_budget_sharing_enabled: Whether budget can be shared across ad sets. Set to False for standard campaigns (default: False). Required by Meta API.
     """
     # Check required parameters
     if not account_id:
@@ -180,7 +182,8 @@ async def create_campaign(
         "name": name,
         "objective": objective,
         "status": status,
-        "special_ad_categories": json.dumps(special_ad_categories)  # Properly format as JSON string
+        "special_ad_categories": json.dumps(special_ad_categories),  # Properly format as JSON string
+        "is_adset_budget_sharing_enabled": "true" if is_adset_budget_sharing_enabled else "false"  # Required by Meta API
     }
     
     # Only set campaign-level budgets if we're not using ad set level budgets

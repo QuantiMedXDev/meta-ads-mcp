@@ -1,5 +1,8 @@
 """MCP server configuration for Meta Ads API."""
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file before other imports
+
 from mcp.server.fastmcp import FastMCP
 import argparse
 import os

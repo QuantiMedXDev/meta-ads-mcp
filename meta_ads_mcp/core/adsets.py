@@ -206,8 +206,12 @@ async def create_adset(
             "age_min": 18,
             "age_max": 65,
             "geo_locations": {"countries": ["US"]},
-            "targeting_automation": {"advantage_audience": 1}
+            "targeting_automation": {"advantage_audience": 0}
         }
+    else:
+        # Ensure targeting_automation is always included to prevent API error 1870227
+        if "targeting_automation" not in targeting:
+            targeting["targeting_automation"] = {"advantage_audience": 0}
     
     endpoint = f"{account_id}/adsets"
     
@@ -227,12 +231,27 @@ async def create_adset(
     if lifetime_budget is not None:
         params["lifetime_budget"] = str(lifetime_budget)
     
-    # Add other parameters if provided
-    if bid_amount is not None:
-        params["bid_amount"] = str(bid_amount)
-    
+    # IMPORTANT: Handle bid strategy carefully to avoid API errors
+    # - LOWEST_COST_WITHOUT_CAP doesn't need bid_amount
+    # - LOWEST_COST_WITH_BID_CAP requires bid_amount
+    # - If neither is specified, don't send bid_strategy at all (uses default LOWEST_COST_WITHOUT_CAP)
     if bid_strategy:
+        # Only add bid_strategy if explicitly requested
         params["bid_strategy"] = bid_strategy
+        # If using BID_CAP strategy, bid_amount is required
+        if "BID_CAP" in bid_strategy.upper() or "COST_CAP" in bid_strategy.upper():
+            if bid_amount is None:
+                return json.dumps({
+                    "error": f"bid_amount is required when using {bid_strategy}",
+                    "details": "Please provide a bid_amount in cents (e.g., 100 = $1.00)"
+                }, indent=2)
+            params["bid_amount"] = str(bid_amount)
+        elif bid_amount is not None:
+            # Add bid_amount if provided even for other strategies
+            params["bid_amount"] = str(bid_amount)
+    elif bid_amount is not None:
+        # If bid_amount provided without strategy, add it
+        params["bid_amount"] = str(bid_amount)
     
     if start_time:
         params["start_time"] = start_time
