@@ -398,4 +398,294 @@ async def update_adset(adset_id: str, frequency_control_specs: Optional[List[Dic
             "error": f"Failed to update ad set {adset_id}",
             "details": error_msg,
             "params_sent": params
-        }, indent=2) 
+        }, indent=2)
+
+
+@mcp_server.tool()
+@meta_api_tool
+async def get_bid_strategy_info(
+    campaign_id: str,
+    optimization_goal: str,
+    access_token: Optional[str] = None
+) -> str:
+    """
+    Get information about bid strategy requirements for a given campaign and optimization goal.
+    This tool helps determine what bid_strategy, bid_amount, or other bid constraints are needed
+    when creating an ad set, especially for REACH optimization which often requires specific bidding.
+    
+    Args:
+        campaign_id: Meta Ads campaign ID
+        optimization_goal: Optimization goal (e.g., 'REACH', 'LINK_CLICKS', 'CONVERSIONS')
+        access_token: Meta API access token (optional - will use cached token if not provided)
+    
+    Returns:
+        Information about bid strategies, common configurations, and what to try
+    """
+    # Get campaign details first
+    campaign_endpoint = f"{campaign_id}"
+    campaign_params = {
+        "fields": "id,name,objective,bid_strategy,status,account_id"
+    }
+    campaign_data = await make_api_request(campaign_endpoint, access_token, campaign_params)
+    
+    if "error" in campaign_data:
+        return json.dumps({
+            "error": "Failed to get campaign details",
+            "details": campaign_data["error"]
+        }, indent=2)
+    
+    # Get any existing adsets to see what bid strategies are actually used
+    adsets_endpoint = f"{campaign_id}/adsets"
+    adsets_params = {
+        "fields": "id,name,optimization_goal,bid_strategy,bid_amount,billing_event",
+        "limit": 5
+    }
+    adsets_data = await make_api_request(adsets_endpoint, access_token, adsets_params)
+    
+    existing_adsets = adsets_data.get("data", []) if "data" in adsets_data else []
+    
+    # Build response with guidance
+    response = {
+        "campaign": {
+            "id": campaign_data.get("id"),
+            "name": campaign_data.get("name"),
+            "objective": campaign_data.get("objective"),
+            "bid_strategy": campaign_data.get("bid_strategy", "Not set at campaign level")
+        },
+        "requested_optimization_goal": optimization_goal,
+        "existing_adsets_in_campaign": []
+    }
+    
+    # Add existing adset bid strategies for reference
+    for adset in existing_adsets:
+        response["existing_adsets_in_campaign"].append({
+            "id": adset.get("id"),
+            "name": adset.get("name"),
+            "optimization_goal": adset.get("optimization_goal"),
+            "bid_strategy": adset.get("bid_strategy"),
+            "bid_amount": adset.get("bid_amount"),
+            "billing_event": adset.get("billing_event")
+        })
+    
+    # Provide guidance based on optimization goal
+    if optimization_goal == "REACH":
+        response["bid_strategy_guidance"] = {
+            "common_issue": "REACH optimization often requires bid constraints due to account settings",
+            "error_code": "2490487 - Bid Amount Or Bid Constraints Required For Bid Strategy",
+            "possible_solutions": [
+                {
+                    "solution": "Try LOWEST_COST_WITH_BID_CAP strategy",
+                    "parameters": {
+                        "bid_strategy": "LOWEST_COST_WITH_BID_CAP",
+                        "bid_amount": "Required (in cents, e.g., 100000 for ₹1,000)"
+                    },
+                    "note": "Most common for REACH campaigns"
+                },
+                {
+                    "solution": "Try COST_CAP strategy", 
+                    "parameters": {
+                        "bid_strategy": "COST_CAP",
+                        "bid_amount": "Required - cost per result goal (in cents)"
+                    },
+                    "note": "Alternative bid strategy for cost control"
+                },
+                {
+                    "solution": "Check if account has ROAS requirements",
+                    "parameters": {
+                        "note": "Some accounts require min_roas_target or other constraints"
+                    },
+                    "action": "This may need to be set in Ads Manager UI"
+                }
+            ],
+            "recommendation": "If existing adsets in this campaign use a specific bid_strategy, use the same one for consistency"
+        }
+    else:
+        response["bid_strategy_guidance"] = {
+            "note": f"For {optimization_goal}, bid_strategy is typically optional",
+            "common_strategies": [
+                {
+                    "strategy": "LOWEST_COST_WITHOUT_CAP",
+                    "description": "Default - no bid cap, Meta optimizes for lowest cost",
+                    "requires_bid_amount": False
+                },
+                {
+                    "strategy": "LOWEST_COST_WITH_BID_CAP",
+                    "description": "Set maximum bid per result",
+                    "requires_bid_amount": True
+                },
+                {
+                    "strategy": "COST_CAP",
+                    "description": "Target cost per result",
+                    "requires_bid_amount": True
+                }
+            ],
+            "recommendation": "Start with LOWEST_COST_WITHOUT_CAP if no specific bid control needed"
+        }
+    
+    # Add helpful tips
+    response["tips"] = [
+        "If you see error 2490487, the account requires bid constraints for this optimization goal",
+        "Check existing adsets in the same campaign to match their bid_strategy",
+        "For REACH, bid_amount is typically required (convert your currency to cents: ₹1,000 = 100000 paise)",
+        "If Ads Manager shows 'Cost per result goal' or 'ROAS goal', those constraints may not be settable via API"
+    ]
+    
+    return json.dumps(response, indent=2)
+
+
+@mcp_server.tool()
+@meta_api_tool
+async def discover_bid_strategy_requirements(
+    account_id: str,
+    campaign_id: str,
+    name: str,
+    optimization_goal: str,
+    billing_event: str,
+    daily_budget: int,
+    targeting: Dict[str, Any],
+    access_token: Optional[str] = None
+) -> str:
+    """
+    Discover the correct bid strategy requirements by attempting to create a test ad set
+    with different bid configurations. This tool helps solve error 2490487: 'Bid Amount Or 
+    Bid Constraints Required For Bid Strategy'.
+    
+    This tool will try multiple bid strategy combinations and report which ones work or fail,
+    helping you understand what your account requires for this specific optimization goal.
+    
+    Args:
+        account_id: Meta Ads account ID (format: act_XXXXXXXXX)
+        campaign_id: Campaign ID to create test ad set in
+        name: Name for the test ad set (will be created as PAUSED and can be deleted after)
+        optimization_goal: Optimization goal (e.g., 'REACH', 'LINK_CLICKS')
+        billing_event: Billing event (e.g., 'IMPRESSIONS')
+        daily_budget: Daily budget in account currency (in cents)
+        targeting: Targeting specifications
+        access_token: Meta API access token (optional - will use cached token if not provided)
+    
+    Returns:
+        Detailed results of each bid strategy attempt with success/failure and error messages
+    """
+    # Ensure targeting_automation is present
+    if "targeting_automation" not in targeting:
+        targeting["targeting_automation"] = {"advantage_audience": 0}
+    
+    # Test configurations to try
+    test_configs = [
+        {
+            "description": "No bid strategy (let Meta use default)",
+            "params": {}
+        },
+        {
+            "description": "LOWEST_COST_WITHOUT_CAP (default strategy, no bid amount)",
+            "params": {
+                "bid_strategy": "LOWEST_COST_WITHOUT_CAP"
+            }
+        },
+        {
+            "description": "LOWEST_COST_WITH_BID_CAP with bid_amount",
+            "params": {
+                "bid_strategy": "LOWEST_COST_WITH_BID_CAP",
+                "bid_amount": str(daily_budget // 10)  # Reasonable bid: 10% of daily budget
+            }
+        },
+        {
+            "description": "COST_CAP with bid_amount (cost per result goal)",
+            "params": {
+                "bid_strategy": "COST_CAP",
+                "bid_amount": str(daily_budget // 10)
+            }
+        }
+    ]
+    
+    results = {
+        "account_id": account_id,
+        "campaign_id": campaign_id,
+        "optimization_goal": optimization_goal,
+        "billing_event": billing_event,
+        "daily_budget": daily_budget,
+        "test_results": [],
+        "summary": {
+            "successful_strategies": [],
+            "failed_strategies": []
+        }
+    }
+    
+    endpoint = f"{account_id}/adsets"
+    
+    # Try each configuration
+    for i, config in enumerate(test_configs):
+        test_name = f"{name} - Test {i+1}"
+        
+        params = {
+            "name": test_name,
+            "campaign_id": campaign_id,
+            "status": "PAUSED",  # Always create as PAUSED
+            "optimization_goal": optimization_goal,
+            "billing_event": billing_event,
+            "daily_budget": str(daily_budget),
+            "targeting": json.dumps(targeting)
+        }
+        
+        # Add bid strategy params
+        params.update(config["params"])
+        
+        test_result = {
+            "test_number": i + 1,
+            "description": config["description"],
+            "parameters_tested": config["params"],
+            "status": "unknown"
+        }
+        
+        try:
+            data = await make_api_request(endpoint, access_token, params, method="POST")
+            
+            if "error" in data:
+                test_result["status"] = "failed"
+                test_result["error"] = {
+                    "message": data["error"].get("message", "Unknown error"),
+                    "code": data["error"].get("code"),
+                    "error_subcode": data["error"].get("error_subcode")
+                }
+                results["summary"]["failed_strategies"].append(config["description"])
+            else:
+                test_result["status"] = "success"
+                test_result["created_adset"] = {
+                    "id": data.get("id"),
+                    "note": "Created as PAUSED - you can delete this test ad set"
+                }
+                results["summary"]["successful_strategies"].append(config["description"])
+                
+                # If we found a working strategy, we can stop here
+                results["recommendation"] = {
+                    "working_configuration": config["params"],
+                    "description": config["description"],
+                    "next_steps": "Use these parameters when creating your actual ad set"
+                }
+                
+        except Exception as e:
+            test_result["status"] = "failed"
+            test_result["error"] = {
+                "message": str(e),
+                "type": "exception"
+            }
+            results["summary"]["failed_strategies"].append(config["description"])
+        
+        results["test_results"].append(test_result)
+        
+        # If we found a working strategy, no need to continue testing
+        if test_result["status"] == "success":
+            results["summary"]["conclusion"] = f"Found working bid strategy: {config['description']}"
+            break
+    
+    # If no strategy worked, add helpful message
+    if not results["summary"]["successful_strategies"]:
+        results["summary"]["conclusion"] = "None of the standard bid strategies worked. This may require account-level settings in Ads Manager."
+        results["next_steps"] = [
+            "Check Ads Manager UI for account-level bidding restrictions",
+            "Look for settings like 'Cost per result goal' or 'ROAS goal' requirements",
+            "Consider switching campaign objective if this optimization goal has restrictions",
+            "Contact Meta support or account manager for account-specific bid requirements"
+        ]
+    
+    return json.dumps(results, indent=2) 

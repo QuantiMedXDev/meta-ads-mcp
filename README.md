@@ -247,6 +247,31 @@ For advanced users who need to self-host, the package can be installed from sour
      - `start_time`, `end_time`: Optional start/end times (ISO 8601)
      - `access_token` (optional): Meta API access token
    - Returns: Confirmation with new ad set details
+   - **Note:** If you encounter error 2490487 "Bid Amount Or Bid Constraints Required", use `get_bid_strategy_info` or `discover_bid_strategy_requirements` to find the correct bid configuration.
+
+9a. `mcp_meta_ads_get_bid_strategy_info` 🆕
+   - Get information about bid strategy requirements for a campaign and optimization goal
+   - Inputs:
+     - `campaign_id`: Meta Ads campaign ID
+     - `optimization_goal`: Optimization goal (e.g., 'REACH', 'LINK_CLICKS')
+     - `access_token` (optional): Meta API access token
+   - Returns: Campaign details, existing ad set bid strategies, and guidance on bid configuration
+   - **Use case:** Understand what bid strategies are commonly used before creating an ad set
+
+9b. `mcp_meta_ads_discover_bid_strategy_requirements` 🆕
+   - Automatically discover the correct bid strategy by testing different configurations
+   - Inputs:
+     - `account_id`: Meta Ads account ID (format: act_XXXXXXXXX)
+     - `campaign_id`: Campaign ID to test in
+     - `name`: Name for test ad sets
+     - `optimization_goal`: Optimization goal (e.g., 'REACH')
+     - `billing_event`: Billing event (e.g., 'IMPRESSIONS')
+     - `daily_budget`: Daily budget in cents
+     - `targeting`: Targeting specification object
+     - `access_token` (optional): Meta API access token
+   - Returns: Test results showing which bid strategies work or fail, with recommended configuration
+   - **Use case:** Solve error 2490487 by finding the exact bid_strategy and bid_amount your account requires
+   - **Note:** Creates test ad sets as PAUSED (can be deleted after discovery). See [BID_STRATEGY_DISCOVERY.md](BID_STRATEGY_DISCOVERY.md) for detailed guide.
 
 10. `mcp_meta_ads_get_ads`
     - Get ads for a Meta Ads account with optional filtering
