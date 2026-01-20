@@ -16,6 +16,7 @@ from . import reports  # Import module to register conditional tools
 from . import duplication  # Import module to register conditional duplication tools
 from .openai_deep_research import search, fetch  # OpenAI MCP Deep Research tools
 from . import video  # Import video module to register video ad tools
+from . import leadgen  # Import leadgen module to register lead form tools
 
 __all__ = [
     'mcp_server',

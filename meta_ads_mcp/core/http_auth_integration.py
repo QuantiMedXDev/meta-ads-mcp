@@ -14,6 +14,7 @@ import json
 # Use context variables instead of thread-local storage for better async support
 _auth_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('auth_token', default=None)
 _pipeboard_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('pipeboard_token', default=None)
+_page_access_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('page_access_token', default=None)
 
 class FastMCPAuthIntegration:
     """Direct integration with FastMCP for HTTP authentication"""
@@ -63,6 +64,30 @@ class FastMCPAuthIntegration:
     def clear_pipeboard_token() -> None:
         """Clear Pipeboard token for the current context"""
         _pipeboard_token.set(None)
+    
+    @staticmethod
+    def set_page_access_token(token: str) -> None:
+        """Set page access token for the current context (for lead form operations)
+        
+        Args:
+            token: Page access token to use for this request
+        """
+        _page_access_token.set(token)
+        logger.debug("Page access token set in context")
+    
+    @staticmethod
+    def get_page_access_token() -> Optional[str]:
+        """Get page access token for the current context
+        
+        Returns:
+            Page access token if set, None otherwise
+        """
+        return _page_access_token.get(None)
+    
+    @staticmethod
+    def clear_page_access_token() -> None:
+        """Clear page access token for the current context"""
+        _page_access_token.set(None)
     
     @staticmethod
     def extract_token_from_headers(headers: dict) -> Optional[str]:
@@ -115,6 +140,24 @@ class FastMCPAuthIntegration:
         if legacy_token:
             logger.debug("Found Pipeboard token in legacy X-PIPEBOARD-API-TOKEN header")
             return legacy_token
+        
+        return None
+    
+    @staticmethod
+    def extract_page_access_token_from_headers(headers: dict) -> Optional[str]:
+        """Extract page access token from HTTP headers
+        
+        Args:
+            headers: HTTP request headers
+            
+        Returns:
+            Page access token if found, None otherwise
+        """
+        # Check for page access token in X-Page-Access-Token header
+        page_token = headers.get('X-Page-Access-Token') or headers.get('x-page-access-token')
+        if page_token:
+            logger.info("Found page access token in X-Page-Access-Token header")
+            return page_token
         
         return None
 
@@ -254,6 +297,7 @@ class AuthInjectionMiddleware(BaseHTTPMiddleware):
         # Extract both types of tokens for dual-header authentication
         auth_token = FastMCPAuthIntegration.extract_token_from_headers(dict(request.headers))
         pipeboard_token = FastMCPAuthIntegration.extract_pipeboard_token_from_headers(dict(request.headers))
+        page_access_token = FastMCPAuthIntegration.extract_page_access_token_from_headers(dict(request.headers))
         
         if auth_token:
             logger.debug(f"HTTP Auth Middleware: Extracted auth token: {auth_token[:10]}...")
@@ -265,6 +309,11 @@ class AuthInjectionMiddleware(BaseHTTPMiddleware):
             logger.debug("Injecting Pipeboard token into request context")
             FastMCPAuthIntegration.set_pipeboard_token(pipeboard_token)
         
+        if page_access_token:
+            logger.info(f"HTTP Auth Middleware: Extracted page access token: {page_access_token[:10]}...")
+            logger.info("Injecting page access token into request context")
+            FastMCPAuthIntegration.set_page_access_token(page_access_token)
+        
         if not auth_token and not pipeboard_token:
             logger.warning("HTTP Auth Middleware: No authentication tokens found in headers")
         
@@ -275,6 +324,8 @@ class AuthInjectionMiddleware(BaseHTTPMiddleware):
             # Clear tokens that were set for this request
             if auth_token:
                 FastMCPAuthIntegration.clear_auth_token()
+            if page_access_token:
+                FastMCPAuthIntegration.clear_page_access_token()
             if pipeboard_token:
                 FastMCPAuthIntegration.clear_pipeboard_token()
 

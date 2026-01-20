@@ -83,6 +83,8 @@ class StreamableHTTPHandler:
             'meta_access_token': False,    # ❌ Use proper auth flows instead
         }
         
+        # Note: Page access token is extracted by AuthInjectionMiddleware in http_auth_integration.py
+        
         # PRIMARY: Check for Bearer token in Authorization header (handles 90%+ of cases)
         auth_header = request_headers.get('Authorization') or request_headers.get('authorization')
         if auth_header and auth_header.lower().startswith('bearer '):
