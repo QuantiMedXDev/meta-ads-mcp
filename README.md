@@ -19,6 +19,7 @@ mcp-name: co.pipeboard/meta-ads-mcp
 
 - [🚀 Getting started with Remote MCP (Recommended for Marketers)](#getting-started-with-remote-mcp-recommended)
 - [Local Installation (Technical Users Only)](#local-installation-technical-users-only)
+- [Running in Development](#running-in-development)
 - [Features](#features)
 - [Configuration](#configuration)
 - [Available MCP Tools](#available-mcp-tools)
@@ -105,6 +106,156 @@ This bypasses the interactive login flow and authenticates immediately. Get your
 🚀 **We strongly recommend using [Remote MCP](https://pipeboard.co) instead** - it's faster, more reliable, and requires no technical setup.
 
 Meta Ads MCP also supports a local streamable HTTP transport, allowing you to run it as a standalone HTTP API for web applications and custom integrations. See **[Streamable HTTP Setup Guide](STREAMABLE_HTTP_SETUP.md)** for complete instructions.
+
+## Running in Development
+
+This section is for developers working on this repository inside the `zorgsocial` workspace.
+
+### Prerequisites
+
+- Python **3.10+** (the repo pins `3.11` via `.python-version` / Dockerfile; `3.13` also works)
+- [`uv`](https://github.com/astral-sh/uv) (recommended) — `pip install uv` or `brew install uv`
+- A Meta Developer App (App ID + App Secret) **or** a Pipeboard API token
+- Optional: Docker, if you prefer containerised runs
+
+### 1. Clone & set up the virtualenv
+
+```bash
+cd meta-ads-mcp
+
+# Create and activate a venv with uv
+uv venv
+source .venv/bin/activate
+
+# Install the package in editable mode with dev deps
+uv pip install -e .
+```
+
+Or with plain `pip`:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### 2. Configure environment variables
+
+Copy the existing `.env` (kept out of git) or create one:
+
+```bash
+# meta-ads-mcp/.env
+META_APP_ID=your_meta_app_id
+META_APP_SECRET=your_meta_app_secret          # optional when using Pipeboard
+PIPEBOARD_API_TOKEN=your_pipeboard_token      # optional; preferred for quick auth
+
+# Optional — only needed if you use the GCS-backed thumbnail upload helpers
+GCS_BUCKET_NAME=your_bucket
+GCS_FOLDER=assets/ad_thumbnails
+GOOGLE_CLOUD_KEY={ "type": "service_account", ... }   # JSON on one line
+```
+
+`python-dotenv` loads `.env` automatically when the server starts.
+
+### 3. Run the MCP server
+
+**stdio transport (default — for Claude Desktop / Cursor local configs):**
+
+```bash
+python -m meta_ads_mcp
+# or, after `uv pip install -e .`
+meta-ads-mcp
+```
+
+**Streamable HTTP transport (for the `quantimed-marketing-suite-api` backend and web clients):**
+
+The backend (`quantimed-marketing-suite-api`) connects to this MCP at `http://localhost:9000/mcp/` by default (see `META_ADS_MCP_URL` in the API). To run a matching local server:
+
+```bash
+python -m meta_ads_mcp --transport streamable-http --host localhost --port 9000
+```
+
+For general HTTP use (any port):
+
+```bash
+python -m meta_ads_mcp --transport streamable-http --host 0.0.0.0 --port 8080
+```
+
+Verify it's listening:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:9000/mcp/
+# any non-000 code means the server is up
+```
+
+> **Note:** `stdio` transport is **not** interactive. Running `python -m meta_ads_mcp` and typing into the terminal will produce `Internal Server Error` from invalid JSON-RPC input — that is expected. Use HTTP transport for manual testing, or let an MCP client (Claude Desktop / Cursor) drive stdio.
+
+To override the URL the API uses, set this in `quantimed-marketing-suite-api/.env`:
+
+```bash
+META_ADS_MCP_URL=http://localhost:9000/mcp/
+```
+
+Smoke test:
+
+```bash
+curl -X POST http://localhost:9000/mcp/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer $PIPEBOARD_API_TOKEN" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1,"params":{}}'
+```
+
+### 4. Run with Docker (optional)
+
+```bash
+docker build -t meta-ads-mcp:dev .
+docker run --rm -it \
+  --env-file .env \
+  -p 8080:8080 \
+  meta-ads-mcp:dev \
+  python -m meta_ads_mcp --transport streamable-http --host 0.0.0.0 --port 8080
+```
+
+### 5. Wire into Claude Desktop / Cursor (local dev)
+
+`~/.cursor/mcp.json` or the Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "meta-ads-dev": {
+      "command": "/absolute/path/to/meta-ads-mcp/.venv/bin/python",
+      "args": ["-m", "meta_ads_mcp"],
+      "env": {
+        "PIPEBOARD_API_TOKEN": "your_pipeboard_token"
+      }
+    }
+  }
+}
+```
+
+### 6. Tests & linting
+
+```bash
+# Unit tests (e2e tests are excluded by default — see pyproject.toml)
+pytest
+
+# Run a single test file
+pytest tests/test_campaigns.py -v
+
+# Run the end-to-end suite (requires a running server + real credentials)
+pytest -m e2e
+```
+
+### Common gotchas
+
+- **`ModuleNotFoundError: meta_ads_mcp`** — activate the venv (`source .venv/bin/activate`) and re-run `uv pip install -e .`.
+- **`Internal Server Error` when running `python -m meta_ads_mcp` in a terminal** — stdio transport is not interactive. Any keystroke is treated as invalid JSON-RPC. Use `--transport streamable-http` for manual testing, or run it from an MCP client.
+- **API logs `httpx.ConnectError: All connection attempts failed`** — the backend (`quantimed-marketing-suite-api`) can't reach the MCP. Start it with `python -m meta_ads_mcp --transport streamable-http --host localhost --port 9000` (matches the default `META_ADS_MCP_URL`).
+- **`401 Unauthorized` on HTTP transport** — missing `Authorization: Bearer …` header or expired Pipeboard token.
+- **Port already in use** — another MCP instance is running; kill it or pick a different `--port`.
+- **Hot reload** — this server has no built-in reloader; restart the process after code changes (or run it under `watchexec -r -- python -m meta_ads_mcp …`).
 
 ## Features
 
