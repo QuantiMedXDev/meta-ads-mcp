@@ -524,10 +524,16 @@ async def search_geo_locations(query: str, access_token: Optional[str] = None,
         return json.dumps({"error": "No search query provided"}, indent=2)
     
     endpoint = "search"
+    # Use the same mechanism as the Ads Manager UI: `qs` (a JSON-encoded array of
+    # query strings) together with `place_fallback=true`. The plain `q` parameter only
+    # matches official country/region/city/zip names, so neighborhoods, communities and
+    # landmarks (type "place", e.g. "Dubai Motor City") are missed. `qs` + place_fallback
+    # returns those place-level matches just like the Facebook Ads Manager location search.
     params = {
         "type": "adgeolocation",
-        "q": query,
-        "limit": limit
+        "qs": json.dumps([query]),
+        "place_fallback": "true",
+        "limit": limit,
     }
     
     if location_types:
