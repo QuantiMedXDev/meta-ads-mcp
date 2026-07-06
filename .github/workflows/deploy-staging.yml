@@ -1,0 +1,17 @@
+name: Deploy to staging
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    uses: QuantiMedXDev/zorg-stack/.github/workflows/deploy-staging.yml@main
+    with:
+      image: meta-ads-mcp
+      deployments: "meta-ads-mcp"
+    secrets: inherit
