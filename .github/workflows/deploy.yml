@@ -1,0 +1,308 @@
+name: Deploy on release
+
+# meta-ads-mcp is a PUBLIC repository, and GitHub does not allow a public
+# repo's workflow to call a reusable workflow hosted in a private repository
+# (QuantiMedXDev/zorg-stack) even with organization-wide access enabled — the
+# call fails before any job is scheduled ("workflow file issue"). Every other
+# service repo is private and uses the shared reusable workflows; this file
+# inlines the same build/deploy steps for meta-ads-mcp only. Keep it in sync
+# with QuantiMedXDev/zorg-stack/.github/workflows/deploy-{prod,staging}.yml if
+# their logic changes.
+#
+# Deploys ONLY when a GitHub Release is published — never on a plain push.
+# The release's target commit MUST be on main or master (verified below); if
+# it isn't, the workflow fails and nothing is deployed. Whether it goes to
+# staging or prod is controlled entirely by the release's "Set as a
+# pre-release" checkbox:
+#   - pre-release checked   -> deploys to staging
+#   - pre-release unchecked -> deploys to prod (a full/final release)
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.decide.outputs.environment }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release was cut from main/master
+        run: |
+          set -e
+          SHA="${{ github.sha }}"
+          ON_MAIN=false
+          ON_MASTER=false
+          if git show-ref --verify --quiet refs/remotes/origin/main; then
+            git merge-base --is-ancestor "$SHA" origin/main && ON_MAIN=true || true
+          fi
+          if git show-ref --verify --quiet refs/remotes/origin/master; then
+            git merge-base --is-ancestor "$SHA" origin/master && ON_MASTER=true || true
+          fi
+          if [ "$ON_MAIN" != "true" ] && [ "$ON_MASTER" != "true" ]; then
+            echo "::error::Release '${{ github.event.release.tag_name }}' (commit $SHA) is not reachable from main or master. Releases must always be cut from main/master — refusing to deploy."
+            exit 1
+          fi
+          echo "OK: release commit is on $( [ "$ON_MAIN" = "true" ] && echo main || echo master )."
+
+      - name: Decide target environment from pre-release flag
+        id: decide
+        run: |
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            ENV=staging
+          else
+            ENV=prod
+          fi
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "Release '${{ github.event.release.tag_name }}' (prerelease=${{ github.event.release.prerelease }}) -> $ENV"
+
+  deploy-prod:
+    needs: validate
+    if: needs.validate.outputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: zorg-prod-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout service source
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: vars
+        run: echo "sha_tag=prod-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: us-east1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}
+            ${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:prod
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check out zorg-stack (deploy manifests)
+        uses: actions/checkout@v4
+        with:
+          repository: QuantiMedXDev/zorg-stack
+          token: ${{ secrets.ZORG_STACK_DEPLOY_TOKEN }}
+          path: zorg-stack
+
+      - name: Install kustomize
+        run: |
+          # Pinned, direct release download (CDN-backed). Avoids the upstream
+          # install_kustomize.sh script, which resolves "latest" via the GitHub
+          # API and intermittently fails ("tar: kustomize_v*...: No such file")
+          # when that unauthenticated API call is rate-limited.
+          KUSTOMIZE_VERSION=5.5.0
+          curl -sSLf "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" -o kustomize.tar.gz
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+          rm -f kustomize.tar.gz kustomize
+          kustomize version
+
+      - name: Update prod image tag
+        working-directory: zorg-stack/k8s/overlays/prod
+        run: |
+          kustomize edit set image "meta-ads-mcp=${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}"
+
+      - name: Commit and push manifest update
+        working-directory: zorg-stack
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/overlays/prod/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No manifest changes (tag unchanged); skipping commit."
+            exit 0
+          fi
+          git commit -m "deploy(prod): meta-ads-mcp -> ${{ steps.vars.outputs.sha_tag }}
+
+          Release: ${{ github.event.release.tag_name }}
+          Source: ${{ github.repository }}@${{ github.sha }}
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          [skip ci]"
+          for i in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected, retrying with rebase (attempt $i)..."
+            git fetch origin main
+            git rebase origin/main
+            sleep $(( (RANDOM % 5) + 1 ))
+          done
+          echo "Failed to push after retries" >&2
+          exit 1
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_ZONE }}
+
+      - name: Apply prod manifests
+        working-directory: zorg-stack
+        run: kubectl apply -k k8s/overlays/prod
+
+      - name: Wait for rollout
+        run: kubectl -n prod rollout status deployment/meta-ads-mcp --timeout=300s
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deployed to prod"
+            echo "- Release: \`${{ github.event.release.tag_name }}\`"
+            echo "- Image: \`${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-staging:
+    needs: validate
+    if: needs.validate.outputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: zorg-staging-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout service source
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: vars
+        run: echo "sha_tag=staging-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: us-east1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}
+            ${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check out zorg-stack (deploy manifests)
+        uses: actions/checkout@v4
+        with:
+          repository: QuantiMedXDev/zorg-stack
+          token: ${{ secrets.ZORG_STACK_DEPLOY_TOKEN }}
+          path: zorg-stack
+
+      - name: Install kustomize
+        run: |
+          # Pinned, direct release download (CDN-backed). Avoids the upstream
+          # install_kustomize.sh script, which resolves "latest" via the GitHub
+          # API and intermittently fails ("tar: kustomize_v*...: No such file")
+          # when that unauthenticated API call is rate-limited.
+          KUSTOMIZE_VERSION=5.5.0
+          curl -sSLf "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" -o kustomize.tar.gz
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+          rm -f kustomize.tar.gz kustomize
+          kustomize version
+
+      - name: Update staging image tag
+        working-directory: zorg-stack/k8s/overlays/staging
+        run: |
+          kustomize edit set image "meta-ads-mcp=${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}"
+
+      - name: Commit and push manifest update
+        working-directory: zorg-stack
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/overlays/staging/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "No manifest changes (tag unchanged); skipping commit."
+            exit 0
+          fi
+          git commit -m "deploy(staging): meta-ads-mcp -> ${{ steps.vars.outputs.sha_tag }}
+
+          Release: ${{ github.event.release.tag_name }}
+          Source: ${{ github.repository }}@${{ github.sha }}
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          [skip ci]"
+          for i in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected, retrying with rebase (attempt $i)..."
+            git fetch origin main
+            git rebase origin/main
+            sleep $(( (RANDOM % 5) + 1 ))
+          done
+          echo "Failed to push after retries" >&2
+          exit 1
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_ZONE }}
+
+      - name: Apply staging manifests
+        working-directory: zorg-stack
+        run: kubectl apply -k k8s/overlays/staging
+
+      - name: Wait for rollout
+        run: kubectl -n staging rollout status deployment/meta-ads-mcp --timeout=300s
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deployed to staging"
+            echo "- Release: \`${{ github.event.release.tag_name }}\`"
+            echo "- Image: \`${{ vars.ARTIFACT_REGISTRY }}/meta-ads-mcp:${{ steps.vars.outputs.sha_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
