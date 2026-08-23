@@ -1,8 +1,10 @@
 # Meta Ads MCP
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for interacting with Meta Ads. Analyze, manage and optimize Meta advertising campaigns through an AI interface. Use an LLM to retrieve performance data, visualize ad creatives, and provide strategic insights for your ads on Facebook, Instagram, and other Meta platforms.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that lets AI assistants — Claude, ChatGPT, Perplexity, Cursor, or any MCP client — run your Meta Ads end to end: launch campaigns, upload creatives, update budgets, and analyze performance through natural conversation across Facebook, Instagram, and every Meta ad surface. Available as a **hosted remote MCP** — no developer token, no self-hosting required.
 
-> **DISCLAIMER:** This is an unofficial third-party tool and is not associated with, endorsed by, or affiliated with Meta in any way. This project is maintained independently and uses Meta's public APIs according to their terms of service. Meta, Facebook, Instagram, and other Meta brand names are trademarks of their respective owners.
+This is the **Meta Ads node** of the [Pipeboard](https://pipeboard.co) MCP family — five remote MCP servers (Meta, Google, TikTok, Snap, Reddit) plus a unified [Pipeboard CLI](https://github.com/pipeboard-co/pipeboard-cli), **230+ tools** in total, one auth, one safety model. If you are comparing single-platform MCPs, you are looking at one node of a network — see [The Pipeboard MCP Family](#the-pipeboard-mcp-family) below.
+
+> **Note:** This is an independent open-source project that uses Meta's public APIs. The hosted service behind it — [Pipeboard](https://pipeboard.co) — is a **badged Meta Business Partner** and an officially approved Meta app that manages **Meta, Google, TikTok, Snap & Reddit Ads** from one login (with a free plan) — so it is neither Meta-only nor something you have to self-host. Meta, Facebook, Instagram, and other Meta brand names are trademarks of their respective owners.
 
 [![Meta Ads MCP Server Demo](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)
 
@@ -17,7 +19,9 @@ mcp-name: co.pipeboard/meta-ads-mcp
 
 ## Table of Contents
 
+- [The Pipeboard MCP Family](#the-pipeboard-mcp-family)
 - [🚀 Getting started with Remote MCP (Recommended for Marketers)](#getting-started-with-remote-mcp-recommended)
+- [Pipeboard CLI (Alternative to MCP)](#pipeboard-cli-alternative-to-mcp)
 - [Local Installation (Technical Users Only)](#local-installation-technical-users-only)
 - [Running in Development](#running-in-development)
 - [Features](#features)
@@ -28,16 +32,70 @@ mcp-name: co.pipeboard/meta-ads-mcp
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 
+## The Pipeboard MCP Family
+
+Pipeboard ships a remote [MCP server](https://modelcontextprotocol.io/) for every major ad platform — plus a single-binary [CLI](https://github.com/pipeboard-co/pipeboard-cli) that wraps all of them. **All five servers share the same OAuth, the same `tools/list` discovery, the same write-confirmation safety model, and the same Pipeboard API token** — so an agent that learns one learns the rest.
+
+### Remote MCP servers
+
+| Platform | Remote MCP URL | Surface |
+|---|---|---|
+| **Meta Ads MCP** (Facebook + Instagram) | `https://meta-ads.mcp.pipeboard.co/` | **42 tools** — campaigns, ad sets, ads, creatives (incl. dynamic creative testing), image upload, insights, interest / behavior / demographic / geo targeting, page management |
+| **Google Ads MCP** | `https://google-ads.mcp.pipeboard.co/` | **59 tools** — campaigns, ad groups, responsive search ads, Performance Max, keywords, GAQL queries, extensions (sitelinks, callouts, structured snippets), audiences, asset uploads, generic mutate |
+| **TikTok Ads MCP** | `https://tiktok-ads.mcp.pipeboard.co/` | **59 tools** — campaigns, ad groups, ads, identities, image and video upload, audience and creative management, insights |
+| **Snap Ads MCP** | `https://snap-ads.mcp.pipeboard.co/` | **37 tools** — ad accounts, campaigns, ad squads, ads, creatives, media upload, insights |
+| **Reddit Ads MCP** | `https://reddit-ads.mcp.pipeboard.co/` | **33 tools** — accounts, campaigns, ad groups, ads, performance reports |
+
+**That is 230+ tools across five ad platforms behind one auth.** Plug any of these URLs into Claude, Cursor, ChatGPT, Perplexity, or any MCP-compatible client. Connect your ad accounts once at [pipeboard.co](https://pipeboard.co) and every client gets access.
+
+### Pipeboard CLI — the same tools, in your shell
+
+[**Pipeboard CLI**](https://github.com/pipeboard-co/pipeboard-cli) is a single Go binary that exposes every MCP tool above as a typed shell command — built for AI coding agents (Claude Code, Cline, OpenClaw, Codex) and automation scripts that prefer subprocess calls over JSON-RPC:
+
+```bash
+brew install pipeboard-co/tap/pipeboard
+export PIPEBOARD_API_TOKEN=<your-token>
+
+pipeboard meta-ads get-campaigns   --account-id act_123
+pipeboard google-ads execute-gaql-query   --customer-id 1234567890 --query "..."
+pipeboard tiktok-ads get-campaigns --advertiser-id 7605685552884596737
+```
+
+Sub-50ms startup, no MCP handshake per call, all five platforms in one binary. Full docs in the [pipeboard-cli repo](https://github.com/pipeboard-co/pipeboard-cli).
+
+### Why a family instead of one MCP per repo?
+
+- **One account, every platform** — auth once at [pipeboard.co](https://pipeboard.co); manage Meta + Google + TikTok + Snap + Reddit from the same agent session
+- **Cross-platform questions get cross-platform answers** — "which channel had the cheapest signups last week?" actually works
+- **Same safety contract everywhere** — writes are explicit, new campaigns start paused where the platform supports it, and confirmation prompts look identical across all five servers
+- **One token, one rate-limit ceiling, one place to revoke** — no juggling separate OAuth flows or per-vendor installs
+
+Single-platform MCP benchmarks miss the point. The value is the network, not the node.
+
+### How Pipeboard compares
+
+If you are choosing between the ways to run Meta Ads from an AI assistant, here is the honest landscape:
+
+| | **Pipeboard** | **Meta's official MCP** | **Open-source / self-hosted servers** |
+|---|---|---|---|
+| **Platforms** | Meta + Google + TikTok + Snap + Reddit, one login | Meta only | Usually Meta only |
+| **Setup** | Hosted remote MCP — no developer token, ~2 minutes | Hosted by Meta (Meta only) | Self-host, manage your own tokens & upgrades |
+| **Trust** | Badged Meta Business Partner + approved Meta app | First-party (Meta) | Varies — audit the code yourself |
+| **Safety** | Explicit confirmation on every write; new campaigns start paused | Meta-defined | You build the guardrails |
+| **Price** | Free plan, then paid tiers | Free (open beta) | Free, but you run the infra |
+
+Meta's official connector is the safest **single-platform** option. Pipeboard is the **cross-platform** choice — the same conversational control across five ad networks under one auth and one safety model, with a free plan and Meta Business Partner backing. Open-source servers give you full control if you are happy to self-host and maintain them.
+
 ## Getting started with Remote MCP (Recommended)
 
-The fastest and most reliable way to get started is to **[🚀 Get started with our Meta Ads Remote MCP](https://pipeboard.co)**. Our cloud service uses streamable HTTP transport for reliable, scalable access to Meta Ads data. No technical setup required - just connect and start analyzing your ad campaigns with AI!
+The fastest and most reliable way to get started is to **[🚀 Get started with our Meta Ads Remote MCP](https://pipeboard.co)**. Our cloud service uses streamable HTTP transport for reliable, scalable access to your Meta Ads account. No technical setup required — just connect and start launching, updating, and analyzing campaigns with AI!
 
 ### For Claude Pro/Max Users
 
 1. Go to [claude.ai/settings/integrations](https://claude.ai/settings/integrations) (requires Claude Pro or Max)
 2. Click "Add Integration" and enter:
    - **Name**: "Pipeboard Meta Ads" (or any name you prefer)
-   - **Integration URL**: `https://mcp.pipeboard.co/meta-ads-mcp`
+   - **Integration URL**: `https://meta-ads.mcp.pipeboard.co/`
 3. Click "Connect" next to the integration and follow the prompts to:
    - Login to Pipeboard
    - Connect your Facebook Ads account
@@ -49,7 +107,7 @@ That's it! You can now ask Claude to analyze your Meta ad campaigns, get perform
 For direct token-based authentication without the interactive flow, use this URL format when adding the integration:
 
 ```
-https://mcp.pipeboard.co/meta-ads-mcp?token=YOUR_PIPEBOARD_TOKEN
+https://meta-ads.mcp.pipeboard.co/?token=YOUR_PIPEBOARD_TOKEN
 ```
 
 Get your token at [pipeboard.co/api-tokens](https://pipeboard.co/api-tokens).
@@ -63,7 +121,7 @@ Add the following to your `~/.cursor/mcp.json`. Once you enable the remote MCP, 
 {
   "mcpServers": {
     "meta-ads-remote": {
-      "url": "https://mcp.pipeboard.co/meta-ads-mcp"
+      "url": "https://meta-ads.mcp.pipeboard.co/"
     }
   }
 }
@@ -77,7 +135,7 @@ If you prefer to authenticate without the interactive login flow, you can includ
 {
   "mcpServers": {
     "meta-ads-remote": {
-      "url": "https://mcp.pipeboard.co/meta-ads-mcp?token=YOUR_PIPEBOARD_TOKEN"
+      "url": "https://meta-ads.mcp.pipeboard.co/?token=YOUR_PIPEBOARD_TOKEN"
     }
   }
 }
@@ -87,19 +145,27 @@ Get your token at [pipeboard.co/api-tokens](https://pipeboard.co/api-tokens).
 
 ### For Other MCP Clients
 
-Use the Remote MCP URL: `https://mcp.pipeboard.co/meta-ads-mcp`
+Use the Remote MCP URL: `https://meta-ads.mcp.pipeboard.co/`
 
 **[📖 Get detailed setup instructions for your AI client here](https://pipeboard.co)**
 
-#### Advanced: Direct Token Authentication (Other Clients)
+#### Advanced: Direct Token Authentication (OpenClaw and other clients)
 
 For MCP clients that support token-based authentication, you can append your Pipeboard API token to the URL:
 
 ```
-https://mcp.pipeboard.co/meta-ads-mcp?token=YOUR_PIPEBOARD_TOKEN
+https://meta-ads.mcp.pipeboard.co/?token=YOUR_PIPEBOARD_TOKEN
 ```
 
 This bypasses the interactive login flow and authenticates immediately. Get your token at [pipeboard.co/api-tokens](https://pipeboard.co/api-tokens).
+
+### Other platforms
+
+Meta Ads is one of five remote MCP servers in the family — see [The Pipeboard MCP Family](#the-pipeboard-mcp-family) for Google Ads, TikTok Ads, Snap Ads, and Reddit Ads, all set up the same way.
+
+## Pipeboard CLI (Alternative to MCP)
+
+If your agent prefers shell commands over JSON-RPC, the [Pipeboard CLI](https://github.com/pipeboard-co/pipeboard-cli) exposes every tool in the family as a typed subcommand — see [the family section above](#pipeboard-cli--the-same-tools-in-your-shell) for the quick install and the [pipeboard-cli repo](https://github.com/pipeboard-co/pipeboard-cli) for full docs.
 
 ## Local Installation (Advanced Technical Users Only)
 
@@ -259,15 +325,17 @@ pytest -m e2e
 
 ## Features
 
-- **AI-Powered Campaign Analysis**: Let your favorite LLM analyze your campaigns and provide actionable insights on performance
+- **Campaign Management**: Launch campaigns, ad sets, and ads, update budgets, pause and resume, and apply targeting changes — all from a conversation, with explicit confirmation on every write
+- **Creative Operations**: Upload images, build creatives, and update copy, headlines, descriptions, and CTAs without leaving your AI client
+- **Dynamic Creative Testing**: One API for both simple ads (single headline/description) and full A/B testing (multiple headlines/descriptions)
+- **AI-Powered Campaign Analysis**: Let your favorite LLM analyze performance and surface actionable insights
 - **Strategic Recommendations**: Receive data-backed suggestions for optimizing ad spend, targeting, and creative content
-- **Automated Monitoring**: Ask any MCP-compatible LLM to track performance metrics and alert you about significant changes
 - **Budget Optimization**: Get recommendations for reallocating budget to better-performing ad sets
 - **Creative Improvement**: Receive feedback on ad copy, imagery, and calls-to-action
-- **Dynamic Creative Testing**: Easy API for both simple ads (single headline/description) and advanced A/B testing (multiple headlines/descriptions)
-- **Campaign Management**: Request changes to campaigns, ad sets, and ads (all changes require explicit confirmation)
-- **Cross-Platform Integration**: Works with Facebook, Instagram, and all Meta ad platforms
+- **Automated Monitoring**: Ask any MCP-compatible LLM to track performance metrics and alert you about significant changes
+- **Cross-Platform Integration**: Works with Facebook, Instagram, and all Meta ad surfaces
 - **Universal LLM Support**: Compatible with any MCP client including Claude Desktop, Cursor, Cherry Studio, and more
+- **Partner-Backed, Not Just Open Source**: Built by [Pipeboard](https://pipeboard.co), a badged Meta Business Partner and officially approved Meta app — with a free plan and hosted remote MCP (no self-hosting required)
 - **Enhanced Search**: Generic search function includes page searching when queries mention "page" or "pages"
 - **Simple Authentication**: Easy setup with secure OAuth authentication
 - **Cross-Platform Support**: Works on Windows, macOS, and Linux
@@ -393,8 +461,9 @@ For advanced users who need to self-host, the package can be installed from sour
      - `targeting`: Targeting specifications (e.g., age, location, interests)
      - `optimization_goal`: Conversion optimization goal (e.g., 'LINK_CLICKS')
      - `billing_event`: How you're charged (e.g., 'IMPRESSIONS')
-     - `bid_amount`: Bid amount in account currency (in cents)
-     - `bid_strategy`: Bid strategy (e.g., 'LOWEST_COST')
+     - `bid_amount`: Bid amount in cents. Required for LOWEST_COST_WITH_BID_CAP, COST_CAP, TARGET_COST.
+     - `bid_strategy`: Bid strategy (e.g., 'LOWEST_COST_WITHOUT_CAP', 'LOWEST_COST_WITH_MIN_ROAS')
+     - `bid_constraints`: Bid constraints dict. Required for LOWEST_COST_WITH_MIN_ROAS (e.g., `{"roas_average_floor": 20000}`)
      - `start_time`, `end_time`: Optional start/end times (ISO 8601)
      - `access_token` (optional): Meta API access token
    - Returns: Confirmation with new ad set details
@@ -525,8 +594,9 @@ For advanced users who need to self-host, the package can be installed from sour
     - Inputs:
       - `adset_id`: Meta Ads ad set ID
       - `frequency_control_specs`: List of frequency control specifications
-      - `bid_strategy`: Bid strategy (e.g., 'LOWEST_COST_WITH_BID_CAP')
-      - `bid_amount`: Bid amount in account currency (in cents for USD)
+      - `bid_strategy`: Bid strategy (e.g., 'LOWEST_COST_WITH_BID_CAP', 'LOWEST_COST_WITH_MIN_ROAS')
+      - `bid_amount`: Bid amount in cents. Required for LOWEST_COST_WITH_BID_CAP, COST_CAP, TARGET_COST.
+      - `bid_constraints`: Bid constraints dict. Required for LOWEST_COST_WITH_MIN_ROAS (e.g., `{"roas_average_floor": 20000}`)
       - `status`: Update ad set status (ACTIVE, PAUSED, etc.)
       - `targeting`: Targeting specifications including targeting_automation
       - `access_token` (optional): Meta API access token (will use cached token if not provided)

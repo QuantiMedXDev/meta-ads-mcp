@@ -28,38 +28,40 @@ def test_duplication_enabled_with_env_var():
 
 @pytest.mark.asyncio
 async def test_forward_duplication_request_no_pipeboard_token():
-    """Test that _forward_duplication_request handles missing Pipeboard token."""
-    from meta_ads_mcp.core.duplication import _forward_duplication_request
-    
+    """Test that _forward_duplication_request raises DuplicationError on missing Pipeboard token."""
+    from meta_ads_mcp.core.duplication import _forward_duplication_request, DuplicationError
+
     # Mock the auth integration to return no Pipeboard token but a Facebook token
     with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
         mock_auth.get_pipeboard_token.return_value = None  # No Pipeboard token
         mock_auth.get_auth_token.return_value = "facebook_token"  # Has Facebook token
-        
-        result = await _forward_duplication_request("campaign", "123456789", None, {})
-        result_json = json.loads(result)
-        
+
+        with pytest.raises(DuplicationError) as exc_info:
+            await _forward_duplication_request("campaign", "123456789", None, {})
+        result_json = json.loads(str(exc_info.value))
+
         assert result_json["error"] == "authentication_required"
         assert "Pipeboard API token not found" in result_json["message"]
 
 
 @pytest.mark.asyncio
 async def test_forward_duplication_request_no_facebook_token():
-    """Test that _forward_duplication_request handles missing Facebook token."""
-    from meta_ads_mcp.core.duplication import _forward_duplication_request
-    
+    """Test that _forward_duplication_request raises DuplicationError on missing Facebook token."""
+    from meta_ads_mcp.core.duplication import _forward_duplication_request, DuplicationError
+
     # Mock the auth integration to return Pipeboard token but no Facebook token
     with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
         mock_auth.get_pipeboard_token.return_value = "pipeboard_token"  # Has Pipeboard token
         mock_auth.get_auth_token.return_value = None  # No Facebook token
-        
+
         # Mock get_current_access_token to also return None
         with patch("meta_ads_mcp.core.auth.get_current_access_token") as mock_get_token:
             mock_get_token.return_value = None
-            
-            result = await _forward_duplication_request("campaign", "123456789", None, {})
-            result_json = json.loads(result)
-            
+
+            with pytest.raises(DuplicationError) as exc_info:
+                await _forward_duplication_request("campaign", "123456789", None, {})
+            result_json = json.loads(str(exc_info.value))
+
             assert result_json["error"] == "authentication_required"
             assert "Meta Ads access token not found" in result_json["message"]
 
@@ -67,45 +69,49 @@ async def test_forward_duplication_request_no_facebook_token():
 @pytest.mark.asyncio
 async def test_forward_duplication_request_with_both_tokens():
     """Test that _forward_duplication_request makes HTTP request with dual headers."""
-    from meta_ads_mcp.core.duplication import _forward_duplication_request
-    
+    from meta_ads_mcp.core.duplication import _forward_duplication_request, DuplicationError
+
     mock_response = Mock()
     mock_response.status_code = 403
     mock_response.json.return_value = {"error": "premium_feature"}
-    
-    # Mock the auth integration to return both tokens
-    with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
-        mock_auth.get_pipeboard_token.return_value = "pipeboard_token"
-        mock_auth.get_auth_token.return_value = "facebook_token"
-        
-        with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-            mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
-            
-            result = await _forward_duplication_request("campaign", "123456789", None, {
-                "name_suffix": " - Test"
-            })
-            result_json = json.loads(result)
-            
-            # Should return premium feature message for 403 response
-            assert result_json["error"] == "premium_feature_required"
-            assert "premium feature" in result_json["message"]
-            
-            # Verify the HTTP request was made with correct parameters
-            mock_client.return_value.__aenter__.return_value.post.assert_called_once()
-            call_args = mock_client.return_value.__aenter__.return_value.post.call_args
-            
-            # Check URL
-            assert call_args[0][0] == "https://mcp.pipeboard.co/api/meta/duplicate/campaign/123456789"
-            
-            # Check dual headers (the key change!)
-            headers = call_args[1]["headers"]
-            assert headers["Authorization"] == "Bearer facebook_token"  # Facebook token for Meta API
-            assert headers["X-Pipeboard-Token"] == "pipeboard_token"   # Pipeboard token for auth
-            assert headers["Content-Type"] == "application/json"
-            
-            # Check JSON payload
-            json_payload = call_args[1]["json"]
-            assert json_payload == {"name_suffix": " - Test"}
+
+    # Mock the auth integration to return both tokens.
+    # Explicitly unset PIPEBOARD_API_BASE_URL so the default production URL is used;
+    # otherwise a dev-env value like http://localhost:4000 would override it.
+    with patch.dict("os.environ", {"PIPEBOARD_API_BASE_URL": "https://mcp.pipeboard.co"}):
+        with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
+            mock_auth.get_pipeboard_token.return_value = "pipeboard_token"
+            mock_auth.get_auth_token.return_value = "facebook_token"
+
+            with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
+                mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
+
+                with pytest.raises(DuplicationError) as exc_info:
+                    await _forward_duplication_request("campaign", "123456789", None, {
+                        "name_suffix": " - Test"
+                    })
+                result_json = json.loads(str(exc_info.value))
+
+                # Should raise with premium feature message for 403 response
+                assert result_json["error"] == "premium_feature_required"
+                assert "premium feature" in result_json["message"]
+
+                # Verify the HTTP request was made with correct parameters
+                mock_client.return_value.__aenter__.return_value.post.assert_called_once()
+                call_args = mock_client.return_value.__aenter__.return_value.post.call_args
+
+                # Check URL
+                assert call_args[0][0] == "https://mcp.pipeboard.co/api/meta/duplicate/campaign/123456789"
+
+                # Check dual headers (the key change!)
+                headers = call_args[1]["headers"]
+                assert headers["Authorization"] == "Bearer facebook_token"  # Facebook token for Meta API
+                assert headers["X-Pipeboard-Token"] == "pipeboard_token"   # Pipeboard token for auth
+                assert headers["Content-Type"] == "application/json"
+
+                # Check JSON payload
+                json_payload = call_args[1]["json"]
+                assert json_payload == {"name_suffix": " - Test"}
 
 
 @pytest.mark.asyncio
@@ -168,7 +174,10 @@ async def test_duplicate_campaign_function_available_when_enabled():
                     "include_creatives": True,
                     "copy_schedule": False,
                     "new_daily_budget": None,
-                    "new_status": "PAUSED"
+                    "new_start_time": None,
+                    "new_end_time": None,
+                    "new_status": "PAUSED",
+                    "pb_token": None
                 }
             )
 

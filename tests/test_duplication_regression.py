@@ -108,11 +108,20 @@ class TestDuplicationDecorators:
 
 class TestDuplicationAPIContract:
     """Test API contract to prevent regression in external API calls."""
-    
+
     @pytest.fixture(autouse=True)
     def enable_feature(self):
-        """Enable the duplication feature for these tests."""
-        with patch.dict(os.environ, {"META_ADS_ENABLE_DUPLICATION": "1"}):
+        """Enable the duplication feature for these tests.
+
+        Also explicitly set PIPEBOARD_API_BASE_URL to the production default so
+        that a dev-environment override (e.g. http://localhost:4000) does not
+        cause URL-assertion tests to fail.
+        """
+        env = {
+            "META_ADS_ENABLE_DUPLICATION": "1",
+            "PIPEBOARD_API_BASE_URL": "https://mcp.pipeboard.co",
+        }
+        with patch.dict(os.environ, env):
             import importlib
             from meta_ads_mcp.core import duplication
             importlib.reload(duplication)
@@ -132,24 +141,25 @@ class TestDuplicationAPIContract:
         
         for resource_type, resource_id, expected_url in test_cases:
             # Mock dual-header authentication
-            with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
-                mock_auth.get_pipeboard_token.return_value = "pipeboard_token"
-                mock_auth.get_auth_token.return_value = "facebook_token"
-                
-                with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                    mock_response = AsyncMock()
-                    mock_response.status_code = 200
-                    mock_response.json.return_value = {"success": True}
-                    mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
-                    
-                    await duplication._forward_duplication_request(
-                        resource_type, resource_id, "test_token", {}
-                    )
-                    
-                    # Verify the correct URL was called
-                    call_args = mock_client.return_value.__aenter__.return_value.post.call_args
-                    actual_url = call_args[0][0]
-                    assert actual_url == expected_url, f"Expected {expected_url}, got {actual_url}"
+            with patch.dict(os.environ, {"PIPEBOARD_API_BASE_URL": "https://mcp.pipeboard.co"}):
+                with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
+                    mock_auth.get_pipeboard_token.return_value = "pipeboard_token"
+                    mock_auth.get_auth_token.return_value = "facebook_token"
+
+                    with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
+                        mock_response = MagicMock()
+                        mock_response.status_code = 200
+                        mock_response.json.return_value = {"success": True}
+                        mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
+
+                        await duplication._forward_duplication_request(
+                            resource_type, resource_id, "test_token", {}
+                        )
+
+                        # Verify the correct URL was called
+                        call_args = mock_client.return_value.__aenter__.return_value.post.call_args
+                        actual_url = call_args[0][0]
+                        assert actual_url == expected_url, f"Expected {expected_url}, got {actual_url}"
 
     @pytest.mark.asyncio
     async def test_request_headers_format(self, enable_feature):
@@ -162,7 +172,7 @@ class TestDuplicationAPIContract:
             mock_auth.get_auth_token.return_value = "facebook_token_67890"
             
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                mock_response = AsyncMock()
+                mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"success": True}
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
@@ -192,7 +202,7 @@ class TestDuplicationAPIContract:
             mock_auth.get_auth_token.return_value = "facebook_token"
             
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                mock_response = AsyncMock()
+                mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"success": True}
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
@@ -201,8 +211,8 @@ class TestDuplicationAPIContract:
                     "campaign", "123456789", "test_token", {}
                 )
                 
-                # Verify timeout is set to 30 seconds
-                mock_client.assert_called_once_with(timeout=30.0)
+                # Verify timeout is set to 120 seconds
+                mock_client.assert_called_once_with(timeout=120.0)
 
 
 class TestDuplicationErrorHandling:
@@ -222,28 +232,30 @@ class TestDuplicationErrorHandling:
         """Test error handling when authentication tokens are missing."""
         duplication = enable_feature
         
+        from meta_ads_mcp.core.duplication import DuplicationError
+
         # Test missing Pipeboard token (primary authentication failure)
         with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
             mock_auth.get_pipeboard_token.return_value = None  # No Pipeboard token
             mock_auth.get_auth_token.return_value = "facebook_token"  # Has Facebook token
-            
-            result = await duplication._forward_duplication_request("campaign", "123", None, {})
-            result_json = json.loads(result)
-            
+
+            with pytest.raises(DuplicationError) as exc_info:
+                await duplication._forward_duplication_request("campaign", "123", None, {})
+            result_json = json.loads(str(exc_info.value))
             assert result_json["error"] == "authentication_required"
             assert "Pipeboard API token not found" in result_json["message"]
-        
+
         # Test missing Facebook token (secondary authentication failure)
         with patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration") as mock_auth:
             mock_auth.get_pipeboard_token.return_value = "pipeboard_token"  # Has Pipeboard token
             mock_auth.get_auth_token.return_value = None  # No Facebook token
-            
+
             with patch("meta_ads_mcp.core.auth.get_current_access_token") as mock_get_token:
                 mock_get_token.return_value = None  # No fallback token
-                
-                result = await duplication._forward_duplication_request("campaign", "123", None, {})
-                result_json = json.loads(result)
-                
+
+                with pytest.raises(DuplicationError) as exc_info:
+                    await duplication._forward_duplication_request("campaign", "123", None, {})
+                result_json = json.loads(str(exc_info.value))
                 assert result_json["error"] == "authentication_required"
                 assert "Meta Ads access token not found" in result_json["message"]
     
@@ -307,27 +319,32 @@ class TestDuplicationErrorHandling:
                     mock_response.text = f"Error {status_code}"
                 
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
-                
-                result = await duplication._forward_duplication_request(
-                    "campaign", "123", "token", {}
-                )
-                result_json = json.loads(result)
-                
-                if response_type == "error":
-                    if status_code == 401:
-                        assert result_json["error"] == expected_error_type
-                    elif status_code == 403:
-                        assert result_json["error"] == expected_error_type
-                    elif status_code == 400:
-                        assert result_json["error"] == expected_error_type
-                    elif status_code == 404:
-                        assert result_json["error"] == expected_error_type
-                    elif status_code == 502:
-                        assert result_json["error"] == expected_error_type
-                    else:
-                        assert result_json["error"] == expected_error_type
-                else:
+
+                if status_code == 200:
+                    result = await duplication._forward_duplication_request(
+                        "campaign", "123", "token", {}
+                    )
+                    result_json = json.loads(result)
                     assert "success" in result_json or "id" in result_json
+                elif status_code == 429:
+                    # 429 raises RateLimitError so FastMCP sets isError: true
+                    from meta_ads_mcp.core.duplication import RateLimitError
+                    with pytest.raises(RateLimitError) as exc_info:
+                        await duplication._forward_duplication_request(
+                            "campaign", "123", "token", {}
+                        )
+                    exc_json = json.loads(str(exc_info.value))
+                    assert exc_json["error"] == expected_error_type
+                else:
+                    # All non-200/non-429 errors raise DuplicationError so FastMCP
+                    # sets isError: true and the usage credit is refunded
+                    from meta_ads_mcp.core.duplication import DuplicationError
+                    with pytest.raises(DuplicationError) as exc_info:
+                        await duplication._forward_duplication_request(
+                            "campaign", "123", "token", {}
+                        )
+                    exc_json = json.loads(str(exc_info.value))
+                    assert exc_json["error"] == expected_error_type
     
     @pytest.mark.asyncio
     async def test_network_error_handling(self, enable_feature):
@@ -340,18 +357,20 @@ class TestDuplicationErrorHandling:
             (Exception("Unexpected error"), "unexpected_error"),
         ]
         
+        from meta_ads_mcp.core.duplication import DuplicationError
         for exception, expected_error in network_errors:
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client, \
                  patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration.get_pipeboard_token", return_value="test_pipeboard_token"), \
                  patch("meta_ads_mcp.core.duplication.FastMCPAuthIntegration.get_auth_token", return_value="test_facebook_token"):
                 mock_client.return_value.__aenter__.return_value.post.side_effect = exception
-                
-                result = await duplication._forward_duplication_request(
-                    "campaign", "123", "token", {}
-                )
-                result_json = json.loads(result)
-                
-                assert result_json["error"] == expected_error
+
+                # Network/unexpected errors raise DuplicationError so FastMCP sets isError: true
+                with pytest.raises(DuplicationError) as exc_info:
+                    await duplication._forward_duplication_request(
+                        "campaign", "123", "token", {}
+                    )
+                exc_json = json.loads(str(exc_info.value))
+                assert exc_json["error"] == expected_error
 
 
 class TestDuplicationParameterHandling:
@@ -377,7 +396,7 @@ class TestDuplicationParameterHandling:
             mock_auth.get_auth_token.return_value = "facebook_token"
             
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                mock_response = AsyncMock()
+                mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"success": True}
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
@@ -436,7 +455,10 @@ class TestDuplicationParameterHandling:
                     "include_creatives": False,
                     "copy_schedule": True,
                     "new_daily_budget": 100.50,
-                    "new_status": "ACTIVE"
+                    "new_start_time": None,
+                    "new_end_time": None,
+                    "new_status": "ACTIVE",
+                    "pb_token": None
                 }
             )
     
@@ -485,7 +507,10 @@ class TestDuplicationParameterHandling:
                             "countries": ["US", "CA"]
                         }
                     },
-                    "new_status": "ACTIVE"
+                    "new_start_time": None,
+                    "new_end_time": None,
+                    "new_status": "ACTIVE",
+                    "pb_token": None
                 }
             )
     
@@ -614,19 +639,13 @@ class TestDuplicationIntegration:
                         }
                         mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
                         
-                        result = await duplication.duplicate_campaign(
-                            campaign_id="123456789",
-                            access_token="facebook_token"  # Use the mocked token
-                        )
-                        
-                        # The @meta_api_tool decorator wraps the result in a data field
-                        result_json = json.loads(result)
-                        if "data" in result_json:
-                            actual_result = json.loads(result_json["data"])
-                        else:
-                            actual_result = result_json
-                            
-                        assert actual_result["success"] is False
+                        from meta_ads_mcp.core.duplication import DuplicationError
+                        with pytest.raises(DuplicationError) as exc_info:
+                            await duplication.duplicate_campaign(
+                                campaign_id="123456789",
+                                access_token="facebook_token"
+                            )
+                        actual_result = json.loads(str(exc_info.value))
                         assert actual_result["error"] == "facebook_connection_required"
                         assert actual_result["message"] == "You need to connect your Facebook account first"
                         assert "details" in actual_result
@@ -654,19 +673,13 @@ class TestDuplicationIntegration:
                         }
                         mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
                         
-                        result = await duplication.duplicate_campaign(
-                            campaign_id="123456789",
-                            access_token="facebook_token"  # Use the mocked token
-                        )
-                        
-                        # The @meta_api_tool decorator wraps the result in a data field
-                        result_json = json.loads(result)
-                        if "data" in result_json:
-                            actual_result = json.loads(result_json["data"])
-                        else:
-                            actual_result = result_json
-                            
-                        assert actual_result["success"] is False
+                        from meta_ads_mcp.core.duplication import DuplicationError
+                        with pytest.raises(DuplicationError) as exc_info:
+                            await duplication.duplicate_campaign(
+                                campaign_id="123456789",
+                                access_token="facebook_token"
+                            )
+                        actual_result = json.loads(str(exc_info.value))
                         assert actual_result["error"] == "subscription_required"
                         assert actual_result["message"] == "This feature is not available in your current plan"
                         assert actual_result["upgrade_url"] == "https://pipeboard.co/upgrade"
@@ -773,7 +786,7 @@ class TestDuplicationRegressionEdgeCases:
             mock_auth.get_auth_token.return_value = "facebook_token"
             
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                mock_response = AsyncMock()
+                mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"success": True}
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response
@@ -800,7 +813,7 @@ class TestDuplicationRegressionEdgeCases:
             mock_auth.get_auth_token.return_value = "facebook_token"
             
             with patch("meta_ads_mcp.core.duplication.httpx.AsyncClient") as mock_client:
-                mock_response = AsyncMock()
+                mock_response = MagicMock()
                 mock_response.status_code = 200
                 mock_response.json.return_value = {"success": True}
                 mock_client.return_value.__aenter__.return_value.post.return_value = mock_response

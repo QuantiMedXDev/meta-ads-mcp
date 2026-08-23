@@ -239,36 +239,48 @@ def setup_fastmcp_http_auth(mcp_server):
     # 2. Patch the methods that provide the Starlette app instance
     # This ensures our middleware is added to the app Uvicorn will actually serve.
 
+    # The streamable-http transport ALWAYS serves the app returned by
+    # streamable_http_app(): the SDK's run_streamable_http_async() calls
+    # self.streamable_http_app() regardless of the json_response setting.
+    # json_response is only forwarded to StreamableHTTPSessionManager as an
+    # SSE-vs-JSON wire-format switch — it does NOT change which Starlette app is
+    # served. Selecting the app to patch by json_response therefore attaches the
+    # auth middleware to the wrong (unserved) app under --sse-response, leaving
+    # the served app without an auth gate. See GHSA-8353-5qhw-8hfw.
+    #
+    # Patch streamable_http_app unconditionally (it is the served app), and
+    # also sse_app when present as defense-in-depth against future SDK routing
+    # changes. Both response formats are served by streamable_http_app today.
     app_provider_methods = []
-    if mcp_server.settings.json_response:
-        if hasattr(mcp_server, "streamable_http_app") and callable(mcp_server.streamable_http_app):
-            app_provider_methods.append("streamable_http_app")
-        else:
-            logger.warning("mcp_server.streamable_http_app not found or not callable, cannot patch for JSON responses.")
-    else: # SSE
-        if hasattr(mcp_server, "sse_app") and callable(mcp_server.sse_app):
-            app_provider_methods.append("sse_app")
-        else:
-            logger.warning("mcp_server.sse_app not found or not callable, cannot patch for SSE responses.")
+    if hasattr(mcp_server, "streamable_http_app") and callable(mcp_server.streamable_http_app):
+        app_provider_methods.append("streamable_http_app")
+    else:
+        logger.error("mcp_server.streamable_http_app not found or not callable — the served streamable-http app cannot be protected with AuthInjectionMiddleware.")
+    if hasattr(mcp_server, "sse_app") and callable(mcp_server.sse_app):
+        app_provider_methods.append("sse_app")
 
     if not app_provider_methods:
         logger.error("No suitable app provider method (streamable_http_app or sse_app) found on mcp_server. Cannot add HTTP Auth middleware.")
         # Fallback or error handling might be needed here if this is critical
-    
+
     for method_name in app_provider_methods:
         original_app_provider_method = getattr(mcp_server, method_name)
-        
-        def new_patched_app_provider_method(*args, **kwargs):
+
+        # Bind method_name / original via default args so each patched closure
+        # captures its own iteration's values. Late-binding by reference would
+        # make every patched method call the LAST iteration's original — a real
+        # bug now that more than one method is patched.
+        def new_patched_app_provider_method(*args, _method_name=method_name, _original=original_app_provider_method, **kwargs):
             # Call the original method to get/create the Starlette app
-            app = original_app_provider_method(*args, **kwargs)
+            app = _original(*args, **kwargs)
             if app:
-                logger.debug(f"Original {method_name} returned app: {type(app)}. Adding AuthInjectionMiddleware.")
+                logger.debug(f"Original {_method_name} returned app: {type(app)}. Adding AuthInjectionMiddleware.")
                 # Now, add our middleware to this specific app instance
-                setup_starlette_middleware(app) 
+                setup_starlette_middleware(app)
             else:
-                logger.error(f"Original {method_name} returned None or a non-app object.")
+                logger.error(f"Original {_method_name} returned None or a non-app object.")
             return app
-            
+
         setattr(mcp_server, method_name, new_patched_app_provider_method)
         logger.debug(f"Patched mcp_server.{method_name} to inject AuthInjectionMiddleware.")
 
@@ -287,36 +299,61 @@ def setup_fastmcp_http_auth(mcp_server):
 # --- AuthInjectionMiddleware definition ---
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import Response
 import json # Ensure json is imported if not already at the top
 
 class AuthInjectionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         logger.debug(f"HTTP Auth Middleware: Processing request to {request.url.path}")
         logger.debug(f"HTTP Auth Middleware: Request headers: {list(request.headers.keys())}")
-        
+
         # Extract both types of tokens for dual-header authentication
         auth_token = FastMCPAuthIntegration.extract_token_from_headers(dict(request.headers))
         pipeboard_token = FastMCPAuthIntegration.extract_pipeboard_token_from_headers(dict(request.headers))
         page_access_token = FastMCPAuthIntegration.extract_page_access_token_from_headers(dict(request.headers))
-        
+
+        if not auth_token:
+            # A request must carry a primary access-token credential: an
+            # Authorization: Bearer header, X-META-ACCESS-TOKEN, or
+            # X-PIPEBOARD-API-TOKEN (all resolved by extract_token_from_headers).
+            # X-Pipeboard-Token is only a supplementary service token for the
+            # duplication callback — on its own it establishes no request auth
+            # context, so it must not admit a request. Otherwise the request
+            # would fall through to tool handlers that use the META_ACCESS_TOKEN
+            # env var. See GHSA-9gw6-46qc-99vr.
+            logger.warning(
+                "HTTP Auth Middleware: rejecting request to %s — no Authorization "
+                "Bearer or X-PIPEBOARD-API-TOKEN header present", request.url.path,
+            )
+            return Response(
+                content=json.dumps({
+                    "error": "Unauthorized",
+                    "message": (
+                        "Authentication required. Provide an Authorization: Bearer "
+                        "<token> header (Meta access token) or an X-PIPEBOARD-API-TOKEN "
+                        "header. See STREAMABLE_HTTP_SETUP.md."
+                    ),
+                }),
+                status_code=401,
+                media_type="application/json",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         if auth_token:
             logger.debug(f"HTTP Auth Middleware: Extracted auth token: {auth_token[:10]}...")
             logger.debug("Injecting auth token into request context")
             FastMCPAuthIntegration.set_auth_token(auth_token)
-        
+
         if pipeboard_token:
             logger.debug(f"HTTP Auth Middleware: Extracted Pipeboard token: {pipeboard_token[:10]}...")
             logger.debug("Injecting Pipeboard token into request context")
             FastMCPAuthIntegration.set_pipeboard_token(pipeboard_token)
-        
+
         if page_access_token:
             logger.info(f"HTTP Auth Middleware: Extracted page access token: {page_access_token[:10]}...")
             logger.info("Injecting page access token into request context")
             FastMCPAuthIntegration.set_page_access_token(page_access_token)
-        
-        if not auth_token and not pipeboard_token:
-            logger.warning("HTTP Auth Middleware: No authentication tokens found in headers")
-        
+
         try:
             response = await call_next(request)
             return response

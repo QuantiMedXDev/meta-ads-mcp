@@ -1,13 +1,26 @@
 """Duplication functionality for Meta Ads API."""
 
 import json
+import logging
 import os
 import httpx
 from typing import Optional, Dict, Any, List, Union
 from .server import mcp_server
-from .api import meta_api_tool
+from .api import meta_api_tool, McpToolError
 from . import auth
 from .http_auth_integration import FastMCPAuthIntegration
+
+logger = logging.getLogger(__name__)
+
+
+class RateLimitError(McpToolError):
+    """Raised on 429 so FastMCP sets isError: true in the MCP response."""
+    pass
+
+
+class DuplicationError(McpToolError):
+    """Raised on all non-success duplication responses so FastMCP sets isError: true."""
+    pass
 
 
 # Only register the duplication functions if the environment variable is set
@@ -25,13 +38,16 @@ if ENABLE_DUPLICATION:
         include_creatives: bool = True,
         copy_schedule: bool = False,
         new_daily_budget: Optional[float] = None,
-        new_status: Optional[str] = "PAUSED"
+        new_start_time: Optional[str] = None,
+        new_end_time: Optional[str] = None,
+        new_status: Optional[str] = "PAUSED",
+        pb_token: Optional[str] = None
     ) -> str:
         """
         Duplicate a Meta Ads campaign with all its ad sets and ads.
 
         Recommended: Use this to run robust experiments.
-        
+
         Args:
             campaign_id: Meta Ads campaign ID to duplicate
             name_suffix: Suffix to add to the duplicated campaign name
@@ -40,6 +56,8 @@ if ENABLE_DUPLICATION:
             include_creatives: Whether to duplicate ad creatives
             copy_schedule: Whether to copy the campaign schedule
             new_daily_budget: Override the daily budget for the new campaign
+            new_start_time: Override start time for duplicated ad sets (ISO 8601, e.g. 2026-03-10T00:00:00-0500)
+            new_end_time: Override end time for duplicated ad sets (ISO 8601, e.g. 2026-03-20T23:59:59-0500)
             new_status: Status for the new campaign (ACTIVE or PAUSED)
         """
         return await _forward_duplication_request(
@@ -53,7 +71,10 @@ if ENABLE_DUPLICATION:
                 "include_creatives": include_creatives,
                 "copy_schedule": copy_schedule,
                 "new_daily_budget": new_daily_budget,
-                "new_status": new_status
+                "new_start_time": new_start_time,
+                "new_end_time": new_end_time,
+                "new_status": new_status,
+                "pb_token": pb_token
             }
         )
 
@@ -62,19 +83,22 @@ if ENABLE_DUPLICATION:
     async def duplicate_adset(
         adset_id: str,
         access_token: Optional[str] = None,
-        target_campaign_id: Optional[str] = None,
+        target_campaign_id: Optional[Union[str, int]] = None,
         name_suffix: Optional[str] = " - Copy",
         include_ads: bool = True,
         include_creatives: bool = True,
         new_daily_budget: Optional[float] = None,
         new_targeting: Optional[Dict[str, Any]] = None,
-        new_status: Optional[str] = "PAUSED"
+        new_start_time: Optional[str] = None,
+        new_end_time: Optional[str] = None,
+        new_status: Optional[str] = "PAUSED",
+        pb_token: Optional[str] = None
     ) -> str:
         """
         Duplicate a Meta Ads ad set with its ads.
 
         Recommended: Use this to run robust experiments.
-        
+
         Args:
             adset_id: Meta Ads ad set ID to duplicate
             target_campaign_id: Campaign ID to move the duplicated ad set to (optional)
@@ -83,8 +107,13 @@ if ENABLE_DUPLICATION:
             include_creatives: Whether to duplicate ad creatives
             new_daily_budget: Override the daily budget for the new ad set
             new_targeting: Override targeting settings for the new ad set
+            new_start_time: Override start time for the duplicated ad set (ISO 8601, e.g. 2026-03-10T00:00:00-0500)
+            new_end_time: Override end time for the duplicated ad set (ISO 8601, e.g. 2026-03-20T23:59:59-0500)
             new_status: Status for the new ad set (ACTIVE or PAUSED)
         """
+        # Coerce numeric IDs to strings
+        if target_campaign_id is not None:
+            target_campaign_id = str(target_campaign_id)
         return await _forward_duplication_request(
             "adset",
             adset_id,
@@ -96,7 +125,10 @@ if ENABLE_DUPLICATION:
                 "include_creatives": include_creatives,
                 "new_daily_budget": new_daily_budget,
                 "new_targeting": new_targeting,
-                "new_status": new_status
+                "new_start_time": new_start_time,
+                "new_end_time": new_end_time,
+                "new_status": new_status,
+                "pb_token": pb_token
             }
         )
 
@@ -105,17 +137,18 @@ if ENABLE_DUPLICATION:
     async def duplicate_ad(
         ad_id: str,
         access_token: Optional[str] = None,
-        target_adset_id: Optional[str] = None,
+        target_adset_id: Optional[Union[str, int]] = None,
         name_suffix: Optional[str] = " - Copy",
         duplicate_creative: bool = True,
         new_creative_name: Optional[str] = None,
-        new_status: Optional[str] = "PAUSED"
+        new_status: Optional[str] = "PAUSED",
+        pb_token: Optional[str] = None
     ) -> str:
         """
         Duplicate a Meta Ads ad.
 
         Recommended: Use this to run robust experiments.
-        
+
         Args:
             ad_id: Meta Ads ad ID to duplicate
             target_adset_id: Ad set ID to move the duplicated ad to (optional)
@@ -124,6 +157,9 @@ if ENABLE_DUPLICATION:
             new_creative_name: Override name for the duplicated creative
             new_status: Status for the new ad (ACTIVE or PAUSED)
         """
+        # Coerce numeric IDs to strings
+        if target_adset_id is not None:
+            target_adset_id = str(target_adset_id)
         return await _forward_duplication_request(
             "ad",
             ad_id,
@@ -133,7 +169,8 @@ if ENABLE_DUPLICATION:
                 "name_suffix": name_suffix,
                 "duplicate_creative": duplicate_creative,
                 "new_creative_name": new_creative_name,
-                "new_status": new_status
+                "new_status": new_status,
+                "pb_token": pb_token
             }
         )
 
@@ -147,13 +184,15 @@ if ENABLE_DUPLICATION:
         new_headline: Optional[str] = None,
         new_description: Optional[str] = None,
         new_cta_type: Optional[str] = None,
-        new_destination_url: Optional[str] = None
+        new_destination_url: Optional[str] = None,
+        new_creative_features_spec: Optional[Dict[str, Any]] = None,
+        pb_token: Optional[str] = None
     ) -> str:
         """
         Duplicate a Meta Ads creative.
 
         Recommended: Use this to run robust experiments.
-        
+
         Args:
             creative_id: Meta Ads creative ID to duplicate
             name_suffix: Suffix to add to the duplicated creative name
@@ -162,7 +201,25 @@ if ENABLE_DUPLICATION:
             new_description: Override the description for the new creative
             new_cta_type: Override the call-to-action type for the new creative
             new_destination_url: Override the destination URL for the new creative
+            new_creative_features_spec: Override / merge into the duplicate's
+                degrees_of_freedom_spec.creative_features_spec. Use individual
+                feature keys (e.g. image_touchups, image_uncrop, text_optimizations,
+                video_auto_crop) with {"enroll_status": "OPT_IN" | "OPT_OUT"} values.
+                Merged on top of the source creative's surviving creative_features_spec
+                entries. NOTE: the legacy "standard_enhancements" key is rejected by
+                Meta on POST (error_subcode 3858504); pass individual feature keys
+                instead. The duplication response surfaces a warning when the source
+                had standard_enhancements so callers know what to set here.
         """
+        # JSON-string fallback for clients that pass dicts as strings
+        if isinstance(new_creative_features_spec, str):
+            try:
+                _parsed_cfs = json.loads(new_creative_features_spec)
+                if isinstance(_parsed_cfs, dict):
+                    new_creative_features_spec = _parsed_cfs
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         return await _forward_duplication_request(
             "creative",
             creative_id,
@@ -173,7 +230,9 @@ if ENABLE_DUPLICATION:
                 "new_headline": new_headline,
                 "new_description": new_description,
                 "new_cta_type": new_cta_type,
-                "new_destination_url": new_destination_url
+                "new_destination_url": new_destination_url,
+                "new_creative_features_spec": new_creative_features_spec,
+                "pb_token": pb_token
             }
         )
 
@@ -197,38 +256,58 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
         # In the dual-header authentication pattern:
         # - Pipeboard token comes from X-Pipeboard-Token header (for authentication)
         # - Facebook token comes from Authorization header (for Meta API calls)
-        
+
         # Get tokens from context set by AuthInjectionMiddleware
         pipeboard_token = FastMCPAuthIntegration.get_pipeboard_token()
+        token_source = "contextvar" if pipeboard_token else None
         facebook_token = FastMCPAuthIntegration.get_auth_token()
-        
+
+        # Fallback: proxy injects pb_token into arguments when ContextVar
+        # is unreachable (Starlette BaseHTTPMiddleware -> FastMCP dispatch breaks it)
+        if not pipeboard_token:
+            pipeboard_token = options.pop('pb_token', None)
+            if pipeboard_token:
+                token_source = "injected_argument"
+                logger.info("Using pipeboard_token from injected argument (ContextVar fallback)")
+        else:
+            # Remove pb_token from options so it is not sent to the API
+            options.pop('pb_token', None)
+
         # Use provided access_token parameter if no Facebook token found in context
         if not facebook_token:
             facebook_token = access_token if access_token else await auth.get_current_access_token()
-        
+
+        logger.info(
+            "Duplication auth: pipeboard=%s, facebook=%s, source=%s",
+            "set" if pipeboard_token else "MISSING",
+            "set" if facebook_token else "MISSING",
+            token_source or "none"
+        )
+
         # Validate we have both required tokens
         if not pipeboard_token:
-            return json.dumps({
+            raise DuplicationError(json.dumps({
                 "error": "authentication_required",
                 "message": "Pipeboard API token not found",
                 "details": {
                     "required": "Valid Pipeboard token via X-Pipeboard-Token header",
                     "received_headers": "Check that the MCP server is forwarding the X-Pipeboard-Token header"
                 }
-            }, indent=2)
-            
+            }, indent=2))
+
         if not facebook_token:
-            return json.dumps({
+            raise DuplicationError(json.dumps({
                 "error": "authentication_required",
                 "message": "Meta Ads access token not found",
                 "details": {
                     "required": "Valid Meta access token from authenticated session",
                     "check": "Ensure Facebook account is connected and token is valid"
                 }
-            }, indent=2)
+            }, indent=2))
 
-        # Construct the API endpoint
-        base_url = "https://mcp.pipeboard.co"
+        # Construct the API endpoint.
+        # PIPEBOARD_API_BASE_URL allows overriding for local e2e testing.
+        base_url = os.environ.get("PIPEBOARD_API_BASE_URL", "https://mcp.pipeboard.co")
         endpoint = f"{base_url}/api/meta/duplicate/{resource_type}/{resource_id}"
         
         # Prepare the dual-header authentication as per API documentation
@@ -243,7 +322,7 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
         clean_options = {k: v for k, v in options.items() if v is not None}
         
         # Make the request to the cloud service
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
                 endpoint,
                 headers=headers,
@@ -257,49 +336,53 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
                 # Validation failed
                 try:
                     error_data = response.json()
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "validation_failed",
                         "errors": error_data.get("errors", [response.text]),
                         "warnings": error_data.get("warnings", [])
-                    }, indent=2)
+                    }, indent=2))
+                except DuplicationError:
+                    raise
                 except:
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "validation_failed",
                         "errors": [response.text],
                         "warnings": []
-                    }, indent=2)
+                    }, indent=2))
             elif response.status_code == 401:
-                return json.dumps({
+                raise DuplicationError(json.dumps({
                     "success": False,
                     "error": "authentication_error",
                     "message": "Invalid or expired API token"
-                }, indent=2)
+                }, indent=2))
             elif response.status_code == 402:
                 try:
                     error_data = response.json()
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "subscription_required",
                         "message": error_data.get("message", "This feature is not available in your current plan"),
                         "upgrade_url": error_data.get("upgrade_url", "https://pipeboard.co/upgrade"),
                         "suggestion": error_data.get("suggestion", "Please upgrade your account to access this feature")
-                    }, indent=2)
+                    }, indent=2))
+                except DuplicationError:
+                    raise
                 except:
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "subscription_required",
                         "message": "This feature is not available in your current plan",
                         "upgrade_url": "https://pipeboard.co/upgrade",
                         "suggestion": "Please upgrade your account to access this feature"
-                    }, indent=2)
+                    }, indent=2))
             elif response.status_code == 403:
                 try:
                     error_data = response.json()
                     # Check if this is a premium feature error
                     if error_data.get("error") == "premium_feature":
-                        return json.dumps({
+                        raise DuplicationError(json.dumps({
                             "success": False,
                             "error": "premium_feature_required",
                             "message": error_data.get("message", "This is a premium feature that requires subscription"),
@@ -307,10 +390,10 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
                                 "upgrade_url": "https://pipeboard.co/upgrade",
                                 "suggestion": "Please upgrade your account to access this feature"
                             })
-                        }, indent=2)
+                        }, indent=2))
                     else:
                         # Default to facebook connection required
-                        return json.dumps({
+                        raise DuplicationError(json.dumps({
                             "success": False,
                             "error": "facebook_connection_required",
                             "message": error_data.get("message", "You need to connect your Facebook account first"),
@@ -318,9 +401,11 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
                                 "login_flow_url": "/connections",
                                 "auth_flow_url": "/api/meta/auth"
                             })
-                        }, indent=2)
+                        }, indent=2))
+                except DuplicationError:
+                    raise
                 except:
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "facebook_connection_required",
                         "message": "You need to connect your Facebook account first",
@@ -328,82 +413,99 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
                             "login_flow_url": "/connections",
                             "auth_flow_url": "/api/meta/auth"
                         }
-                    }, indent=2)
+                    }, indent=2))
             elif response.status_code == 404:
-                return json.dumps({
+                raise DuplicationError(json.dumps({
                     "success": False,
                     "error": "resource_not_found",
                     "message": f"{resource_type.title()} not found or access denied",
                     "suggestion": f"Verify the {resource_type} ID and your Facebook account permissions"
-                }, indent=2)
+                }, indent=2))
             elif response.status_code == 429:
-                return json.dumps({
-                    "error": "rate_limit_exceeded", 
+                # Raise so FastMCP sets isError: true in MCP response,
+                # enabling the Next.js proxy to detect and retry.
+                raise RateLimitError(json.dumps({
+                    "error": "rate_limit_exceeded",
                     "message": "Meta API rate limit exceeded",
                     "details": {
                         "suggestion": "Please wait before retrying",
                         "retry_after": response.headers.get("Retry-After", "60")
                     }
-                }, indent=2)
+                }, indent=2))
             elif response.status_code == 502:
                 try:
                     error_data = response.json()
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "meta_api_error",
                         "message": error_data.get("message", "Facebook API error"),
                         "recoverable": True,
                         "suggestion": "Please wait 5 minutes before retrying"
-                    }, indent=2)
+                    }, indent=2))
+                except DuplicationError:
+                    raise
                 except:
-                    return json.dumps({
+                    raise DuplicationError(json.dumps({
                         "success": False,
                         "error": "meta_api_error",
                         "message": "Facebook API error",
                         "recoverable": True,
                         "suggestion": "Please wait 5 minutes before retrying"
-                    }, indent=2)
+                    }, indent=2))
             else:
                 error_detail = response.text
+                error_json = None
                 try:
                     error_json = response.json()
                     error_detail = error_json.get("message", error_detail)
                 except:
                     pass
-                
-                return json.dumps({
-                    "error": "duplication_failed",
-                    "message": f"Failed to duplicate {resource_type}",
+
+                result = {
+                    "error": error_json.get("error", "duplication_failed") if error_json else "duplication_failed",
+                    "message": error_json.get("message", f"Failed to duplicate {resource_type}") if error_json else f"Failed to duplicate {resource_type}",
                     "details": {
                         "status_code": response.status_code,
                         "error_detail": error_detail,
                         "resource_type": resource_type,
                         "resource_id": resource_id
                     }
-                }, indent=2)
+                }
+
+                # Forward structured error fields from the API response
+                if error_json:
+                    for field in ("suggestion", "error_subcode", "error_user_title",
+                                  "error_user_msg", "raw_code", "raw_type", "recoverable"):
+                        if error_json.get(field) is not None:
+                            result[field] = error_json[field]
+
+                raise DuplicationError(json.dumps(result, indent=2))
     
     except httpx.TimeoutException:
-        return json.dumps({
+        raise DuplicationError(json.dumps({
             "error": "request_timeout",
             "message": "Request to duplication service timed out",
             "details": {
                 "suggestion": "Please try again later",
-                "timeout": "30 seconds"
+                "timeout": "120 seconds"
             }
-        }, indent=2)
-    
+        }, indent=2))
+
     except httpx.RequestError as e:
-        return json.dumps({
-            "error": "network_error", 
+        raise DuplicationError(json.dumps({
+            "error": "network_error",
             "message": "Failed to connect to duplication service",
             "details": {
                 "error": str(e),
                 "suggestion": "Check your internet connection and try again"
             }
-        }, indent=2)
-    
+        }, indent=2))
+
+    except (RateLimitError, DuplicationError):
+        raise  # Let FastMCP handle these to set isError: true
+
     except Exception as e:
-        return json.dumps({
+        raise DuplicationError(json.dumps({
             "error": "unexpected_error",
             "message": f"Unexpected error during {resource_type} duplication",
             "details": {
@@ -411,7 +513,7 @@ async def _forward_duplication_request(resource_type: str, resource_id: str, acc
                 "resource_type": resource_type,
                 "resource_id": resource_id
             }
-        }, indent=2)
+        }, indent=2))
 
 
 def _get_estimated_components(resource_type: str, options: Dict[str, Any]) -> Dict[str, Any]:
