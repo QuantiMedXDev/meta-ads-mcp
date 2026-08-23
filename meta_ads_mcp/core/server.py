@@ -323,7 +323,9 @@ def main():
         # request is rejected with HTTP 421 (the 1.0.106 production
         # regression). The protection is irrelevant for a loopback-only
         # service that no external client can reach.
-        mcp_server.settings.transport_security.enable_dns_rebinding_protection = False
+        # Guard: older mcp SDK versions have transport_security=None.
+        if getattr(mcp_server.settings, "transport_security", None) is not None:
+            mcp_server.settings.transport_security.enable_dns_rebinding_protection = False
 
         # Import all tool modules to ensure they are registered
         logger.info("Ensuring all tools are registered for HTTP transport")
